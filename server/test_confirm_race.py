@@ -155,6 +155,103 @@ state = rc.get_json().get("state", {})
 check("确认响应 {state:{...,violations}} 结构不变",
       rc.status_code == 200 and "violations" in state and "version" in state)
 
+# --- 格值1总数区间 ---
+cur = get_state()
+R = {"rows": cur["rows"], "cols": cur["cols"], "grid": cur["grid"],
+     "locks": cur["locks"], "k": cur["k"]}
+total = R["rows"] * R["cols"]
+
+# 非法区间 -> 400，原稿不变
+before_v = get_state()["version"]
+for bad in [[2], [2, None], [3, 2], [-1, 2], [0, total + 1], "x", [1.0, 2], [None, None]]:
+    rr = client.post("/api/preview", json={**R, "onesRange": bad})
+    check(f"非法区间 {json.dumps(bad)} -> 400", rr.status_code == 400)
+check("非法区间不改变版本", get_state()["version"] == before_v)
+
+# 合法但不可达的区间 -> solvable=false 且无 token
+ones_now = sum(v for row in R["grid"] for v in row)
+r = client.post("/api/preview", json={**R, "onesRange": [total, total]})
+# 全 1 行/列恒超限：上限=total 必不可达
+b = r.get_json()
+check("区间不可达 solvable=false 无令牌",
+      r.status_code == 200 and b["solvable"] is False and "token" not in b
+      and b["onesRange"] == [total, total], json.dumps(b)[:200])
+check("无解响应带原稿 1 总数", b.get("onesCount") == ones_now)
+
+# 可达区间 [0,total-1]：可解、计数达标并带令牌
+r = client.post("/api/preview", json={**R, "onesRange": [0, total - 1]})
+b = r.get_json()
+check("可达区间预览成功", r.status_code == 200 and b["solvable"] and b["token"])
+rep_ones = sum(v for row in b["repaired"] for v in row)
+check("修补稿 1 总数在区间内且响应给出双方计数",
+      0 <= rep_ones <= total - 1
+      and b["onesCount"] == ones_now
+      and b["repairedOnesCount"] == rep_ones,
+      f"ones={rep_ones}, orig={b.get('onesCount')}")
+check("规范化输入带 onesRange", b["input"]["onesRange"] == [0, total - 1])
+rtoken = b["token"]
+
+# 确认体缺少区间 -> mismatch 409，原稿不变
+r = client.post("/api/confirm", json=payload(R, rtoken))
+check("确认体区间缺失 -> 409 mismatch", r.status_code == 409)
+check("mismatch 后原稿区间/版本不变",
+      get_state()["version"] == before_v and get_state().get("onesRange") is None)
+
+# 区间端点变化 -> mismatch 409
+r = client.post("/api/confirm",
+                json=payload({**R, "onesRange": [0, total]}, rtoken))
+check("确认体区间被改动 -> 409 mismatch", r.status_code == 409)
+
+# 一致确认成功 -> 区间随原稿持久化，版本 +1
+r = client.post("/api/confirm",
+                json=payload({**R, "onesRange": [0, total - 1]}, rtoken))
+check("区间预览确认成功 200", r.status_code == 200)
+st = r.get_json()["state"]
+check("确认后区间持久化、版本 +1",
+      st["version"] == before_v + 1 and st["onesRange"] == [0, total - 1]
+      and st["onesCount"] == rep_ones,
+      f"v={st['version']} range={st.get('onesRange')}")
+
+# 重复令牌 -> consumed
+r = client.post("/api/confirm",
+                json=payload({**R, "onesRange": [0, total - 1]}, rtoken))
+check("区间令牌重复确认 -> 409", r.status_code == 409)
+
+# 甲、乙区间不同：甲确认后乙的旧版本令牌 stale
+cur = get_state()
+R2 = {"rows": cur["rows"], "cols": cur["cols"], "grid": cur["grid"],
+      "locks": cur["locks"], "k": cur["k"]}
+pa1 = client.post("/api/preview",
+                  json={**R2, "onesRange": [0, total - 1]}).get_json()
+pb1 = client.post("/api/preview",
+                  json={**R2, "onesRange": None}).get_json()
+check("两份区间/无区间预览令牌不同",
+      pa1["solvable"] and pb1["solvable"] and pa1["token"] != pb1["token"])
+r = client.post("/api/confirm",
+                json=payload({**R2, "onesRange": [0, total - 1]}, pa1["token"]))
+check("甲（带区间）确认成功", r.status_code == 200
+      and r.get_json()["state"]["onesRange"] == [0, total - 1])
+r = client.post("/api/confirm", json=payload(R2, pb1["token"]))
+check("乙（旧版本无区间令牌）-> 409 stale", r.status_code == 409)
+
+# 新预览传 null 区间并确认 -> 区间被清除（null），且与无字段请求等价
+cur = get_state()
+R3 = {"rows": cur["rows"], "cols": cur["cols"], "grid": cur["grid"],
+      "locks": cur["locks"], "k": cur["k"]}
+pv = client.post("/api/preview", json={**R3, "onesRange": None}).get_json()
+check("无区间预览 onesRange=null", pv["solvable"] and pv["onesRange"] is None)
+# 无字段请求体与 null 规范化一致，应能同令牌确认
+body3 = dict(R3)
+body3["token"] = pv["token"]
+r = client.post("/api/confirm", json=body3)
+check("无字段确认体与 null 区间预览兼容", r.status_code == 200)
+check("确认后区间为 null", r.get_json()["state"]["onesRange"] is None)
+
+# 无区间响应仍携带计数字段、可确认
+st0 = get_state()
+check("state 始终带 onesCount/onesRange",
+      "onesCount" in st0 and st0["onesRange"] is None)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} 项失败：{FAILS}")

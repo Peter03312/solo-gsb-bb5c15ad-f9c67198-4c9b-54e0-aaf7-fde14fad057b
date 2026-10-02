@@ -24,6 +24,7 @@ def _design_payload(design):
     payload = dict(design)
     payload["violations"] = find_violations(
         design["grid"], design["rows"], design["cols"], design["k"])
+    payload["onesCount"] = sum(v for row in design["grid"] for v in row)
     return payload
 
 
@@ -40,21 +41,24 @@ def get_state():
 @app.post("/api/preview")
 def preview():
     try:
-        rows, cols, grid, locks, k = validate_design(request.get_json(silent=True))
+        rows, cols, grid, locks, k, ones_range = validate_design(
+            request.get_json(silent=True))
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    input_obj = canonical(rows, cols, grid, locks, k)
+    input_obj = canonical(rows, cols, grid, locks, k, ones_range)
     input_text = _canonical_text(input_obj)
     violations = find_violations(grid, rows, cols, k)
-    solved = solve_repair(rows, cols, k, grid, locks)
+    solved = solve_repair(rows, cols, k, grid, locks, ones_range)
 
     if solved is None:
-        # 无可行修补：保留原稿，仅报无解（不产生可确认的预览）
+        # 无可行修补（含格值1总数区间不可达）：保留原稿，仅报无解（不发放令牌）
         return jsonify({
             "solvable": False,
             "violations": violations,
             "input": input_obj,
+            "onesCount": sum(v for row in grid for v in row),
+            "onesRange": input_obj["onesRange"],
         })
 
     result = {
@@ -71,6 +75,9 @@ def preview():
         "token": token,
         "violations": violations,
         "input": input_obj,
+        "onesCount": sum(v for row in grid for v in row),
+        "repairedOnesCount": sum(v for row in solved["repaired"] for v in row),
+        "onesRange": input_obj["onesRange"],
         **result,
     })
 
@@ -86,13 +93,14 @@ def confirm():
         return jsonify({"error": "缺少预览令牌"}), 400
 
     try:
-        rows, cols, grid, locks, k = validate_design(body)
+        rows, cols, grid, locks, k, ones_range = validate_design(body)
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # 原子确认：令牌未消费、草稿与预览输入一致、预览绑定的原稿版本未变，
-    # 三者同时成立才覆盖原稿（版本仅 +1）并消费令牌；否则整体回滚。
-    input_text = _canonical_text(canonical(rows, cols, grid, locks, k))
+    # 原子确认：令牌未消费、草稿与预览输入一致（含格值1区间）、预览绑定的
+    # 原稿版本未变，三者同时成立才覆盖原稿（版本仅 +1、区间随原稿持久化）
+    # 并消费令牌；否则整体回滚。
+    input_text = _canonical_text(canonical(rows, cols, grid, locks, k, ones_range))
     design, reason = db.commit_preview(token, input_text)
     if design is None:
         message = {

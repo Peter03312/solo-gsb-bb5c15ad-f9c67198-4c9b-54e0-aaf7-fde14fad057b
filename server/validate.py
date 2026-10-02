@@ -14,8 +14,10 @@ def _is_int(v):
 
 
 def validate_design(payload):
-    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k)。
+    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k, ones_range)。
 
+    ones_range 为 None（未填写区间）或 (下限, 上限)：填写时两端都必填，
+    且满足 0 <= 下限 <= 上限 <= 行数×列数。
     不合法时抛出 ValidationError。
     """
     if not isinstance(payload, dict):
@@ -53,12 +55,36 @@ def validate_design(payload):
             raise ValidationError(f"锁定格 ({r + 1}, {c + 1}) 越界")
         norm_locks.add((r, c))
 
+    # 格值 1 总数区间：未填（键缺失或 null）沿用现有修补规则；
+    # 填写时必须是 [下限, 上限] 两元素数组，两端都必填，
+    # 且 0 <= 下限 <= 上限 <= 行数×列数（不悄悄截断）。
+    total = rows * cols
+    raw_range = payload.get("onesRange", None)
+    if raw_range is None:
+        ones_range = None
+    elif (isinstance(raw_range, list) and len(raw_range) == 2
+          and _is_int(raw_range[0]) and _is_int(raw_range[1])):
+        lower, upper = raw_range
+        if lower < 0 or upper < 0:
+            raise ValidationError("格值1总数区间端点不得为负数")
+        if lower > upper:
+            raise ValidationError("格值1总数区间下限不得大于上限")
+        if upper > total:
+            raise ValidationError(
+                f"格值1总数区间上限 {upper} 超出当前尺寸总格数 {total}"
+                f"（{rows}×{cols}），请调整区间或尺寸")
+        ones_range = (lower, upper)
+    else:
+        raise ValidationError(
+            "格值1总数区间须为 [下限, 上限]，填写时两端都必填"
+            "（0 ≤ 下限 ≤ 上限 ≤ 行数×列数）；不填时请传 null 或省略")
+
     grid = [[int(v) for v in row] for row in grid]
     locks = sorted(norm_locks)
-    return rows, cols, grid, locks, k
+    return rows, cols, grid, locks, k, ones_range
 
 
-def canonical(rows, cols, grid, locks, k):
+def canonical(rows, cols, grid, locks, k, ones_range=None):
     """规范化后的可哈希表示，用于预览一致性比对。"""
     return {
         "rows": rows,
@@ -66,4 +92,6 @@ def canonical(rows, cols, grid, locks, k):
         "grid": [list(row) for row in grid],
         "locks": [list(p) for p in sorted(map(tuple, locks))],
         "k": k,
+        "onesRange": None if ones_range is None
+        else [ones_range[0], ones_range[1]],
     }

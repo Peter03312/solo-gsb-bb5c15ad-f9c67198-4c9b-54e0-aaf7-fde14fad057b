@@ -55,6 +55,14 @@ header h1 { margin: 0.2rem 0; font-size: 1.5rem; }
   font-size: 0.95rem;
 }
 
+.range-field { flex-wrap: wrap; }
+.range-field input { width: 4.2rem; }
+.range-sep { color: #7a8197; }
+.range-total { color: #8a90a3; font-size: 0.8rem; }
+.count-line strong { color: var(--ink); }
+.count-line.out-of-range { color: #a32b2b; }
+.count-line.out-of-range strong { color: #a32b2b; }
+
 .mode-switch { display: inline-flex; border: 1px solid #c9cfdd; border-radius: 7px; overflow: hidden; }
 .mode-switch button {
   border: none;

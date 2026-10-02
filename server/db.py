@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS design (
     grid       TEXT NOT NULL,
     locks      TEXT NOT NULL,
     k          INTEGER NOT NULL,
+    ones_range TEXT,
     version    INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS preview (
 );
 """
 
-# 默认原稿：4x4 交错平纹，无锁定，K=2
+# 默认原稿：4x4 交错平纹，无锁定，K=2，不指定格值1总数区间
 DEFAULT_DESIGN = {
     "rows": 4,
     "cols": 4,
@@ -41,6 +42,7 @@ DEFAULT_DESIGN = {
              [1, 0, 1, 0]],
     "locks": [],
     "k": 2,
+    "onesRange": None,
 }
 
 # 确认失败的原子结果：(设计稿, None) 成功；(None, 原因) 冲突
@@ -83,25 +85,36 @@ class Database:
                     " base_version, created_at) SELECT token, input_json,"
                     " result_json, NULL, created_at FROM preview_old")
                 conn.execute("DROP TABLE preview_old")
+            # 旧库迁移：原稿补齐格值1总数区间列（旧稿无区间，置 NULL）
+            dcols = {r["name"] for r in conn.execute("PRAGMA table_info(design)")}
+            if "ones_range" not in dcols:
+                conn.execute("ALTER TABLE design ADD COLUMN ones_range TEXT")
             row = conn.execute("SELECT COUNT(*) AS n FROM design").fetchone()
             if row["n"] == 0:
                 conn.execute(
                     "INSERT INTO design (id, rows, cols, grid, locks, k,"
-                    " version, updated_at) VALUES (1, ?, ?, ?, ?, ?, 1, ?)",
+                    " ones_range, version, updated_at)"
+                    " VALUES (1, ?, ?, ?, ?, ?, ?, 1, ?)",
                     (DEFAULT_DESIGN["rows"], DEFAULT_DESIGN["cols"],
                      json.dumps(DEFAULT_DESIGN["grid"]),
                      json.dumps(DEFAULT_DESIGN["locks"]),
-                     DEFAULT_DESIGN["k"], _now()),
+                     DEFAULT_DESIGN["k"],
+                     None if DEFAULT_DESIGN["onesRange"] is None
+                     else json.dumps(DEFAULT_DESIGN["onesRange"]),
+                     _now()),
                 )
 
     @staticmethod
     def _row_to_design(row):
+        raw_range = row["ones_range"]
+        ones_range = None if raw_range is None else json.loads(raw_range)
         return {
             "rows": row["rows"],
             "cols": row["cols"],
             "grid": json.loads(row["grid"]),
             "locks": json.loads(row["locks"]),
             "k": row["k"],
+            "onesRange": ones_range,
             "version": row["version"],
         }
 
@@ -155,11 +168,15 @@ class Database:
                 rows, cols, locks, k = (
                     input_obj["rows"], input_obj["cols"],
                     input_obj["locks"], input_obj["k"])
+                # 旧版预览（规范化文本中无 onesRange）按未填区间处理
+                ones_range = input_obj.get("onesRange")
                 conn.execute(
                     "UPDATE design SET rows = ?, cols = ?, grid = ?, locks = ?,"
-                    " k = ?, version = version + 1, updated_at = ? WHERE id = 1",
+                    " k = ?, ones_range = ?, version = version + 1,"
+                    " updated_at = ? WHERE id = 1",
                     (rows, cols, json.dumps(grid), json.dumps(locks),
-                     k, _now()),
+                     k, None if ones_range is None else json.dumps(ones_range),
+                     _now()),
                 )
                 # 仅在条件全部满足时消费令牌；UPDATE 后删除，行锁持有到提交
                 deleted = conn.execute(
