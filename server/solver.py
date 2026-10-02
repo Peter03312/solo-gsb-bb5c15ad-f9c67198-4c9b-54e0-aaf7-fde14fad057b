@@ -4,6 +4,9 @@
 编码为 SAT 硬约束，用 MaxSAT(RC2) 求翻转未锁定格数最少的修补，
 再以"按行展开字典序最小"为目标逐格假设求解，得到最终格值序列。
 
+可选的格值1总数区间 [下限, 上限] 以基数约束（Sinz 顺序计数器）
+编码为硬约束：只有总数达标的修补稿才参与翻转数与字典序比较。
+
 格值约定：0 = 经线在上，1 = 纬线在上。
 """
 
@@ -17,14 +20,16 @@ def _var(r, c, cols):
     return r * cols + c + 1
 
 
-def build_hard_clauses(rows, cols, k, grid, locks):
-    """构造硬约束子句。
+def build_hard_clauses(rows, cols, k, grid, locks, ones_range=None):
+    """构造硬约束子句，返回 (子句列表, 下一个空闲变量编号)。
 
     - 行约束：对每行、每个环向起点，长度 L = min(K+1, cols) 的窗口
       不允许全 0 或全 1。L == cols 时窗口即整行，恰好表达
       "全同行视为无限浮长"。
     - 列约束：同理，窗口长度 L = min(K+1, rows)。
     - 锁定格：固定为原稿值。
+    - 总数区间：指定 ones_range = [下限, 上限] 时，格值 1 的总数
+      须落在区间内（基数约束，Sinz 顺序计数器编码）。
     """
     clauses = []
 
@@ -56,7 +61,17 @@ def build_hard_clauses(rows, cols, k, grid, locks):
         v = _var(r, c, cols)
         clauses.append([v if grid[r][c] == 1 else -v])
 
-    return clauses
+    next_var = rows * cols + 1
+    if ones_range is not None:
+        lo, hi = ones_range
+        lits = [_var(r, c, cols) for r in range(rows) for c in range(cols)]
+        n = len(lits)
+        # 格值1总数 <= 上限
+        clauses, next_var = _at_most(clauses, lits, hi, next_var)
+        # 格值1总数 >= 下限  <=>  取 0 的格数 <= n - 下限
+        clauses, next_var = _at_most(clauses, [-v for v in lits], n - lo, next_var)
+
+    return clauses, next_var
 
 
 def _flip_lits(rows, cols, grid, locks):
@@ -76,8 +91,12 @@ def _at_most(clauses, lits, bound, next_var):
     """Sinz 顺序计数器编码：sum(lits) <= bound，返回新增子句。
 
     next_var 为第一个空闲变量编号（须大于所有已用变量）。
+    bound < 0 时约束不可满足，直接加入空子句。
     """
     n = len(lits)
+    if bound < 0:
+        clauses.append([])
+        return clauses, next_var
     if bound >= n:
         return clauses, next_var
     if bound == 0:
@@ -105,8 +124,11 @@ def _at_most(clauses, lits, bound, next_var):
     return clauses, next_var + n * bound
 
 
-def solve_repair(rows, cols, k, grid, locks):
+def solve_repair(rows, cols, k, grid, locks, ones_range=None):
     """求最优修补。
+
+    ones_range = [下限, 上限] 时，仅在格值1总数达标的修补稿中
+    选翻转最少、并列按行展开字典序最小者。
 
     返回 None 表示无可行修补；否则返回 dict：
     {
@@ -114,7 +136,7 @@ def solve_repair(rows, cols, k, grid, locks):
         "flips":    [[r, c], ...] 被翻转的格（按行展开序）,
     }
     """
-    hard = build_hard_clauses(rows, cols, k, grid, locks)
+    hard, next_var = build_hard_clauses(rows, cols, k, grid, locks, ones_range)
     locked = set(map(tuple, locks))
 
     # 第一阶段：MaxSAT 求最少翻转数
@@ -137,7 +159,7 @@ def solve_repair(rows, cols, k, grid, locks):
     # 第二阶段：在翻转数 <= best 的约束下，逐格求字典序最小格值序列
     clauses = [cl[:] for cl in hard]
     clauses, _ = _at_most(clauses, _flip_lits(rows, cols, grid, locks),
-                          best, rows * cols + 1)
+                          best, next_var)
 
     with Solver(name="g3", bootstrap_with=clauses) as solver:
         for r in range(rows):

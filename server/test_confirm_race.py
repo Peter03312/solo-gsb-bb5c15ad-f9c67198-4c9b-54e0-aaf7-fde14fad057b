@@ -155,6 +155,79 @@ state = rc.get_json().get("state", {})
 check("确认响应 {state:{...,violations}} 结构不变",
       rc.status_code == 200 and "violations" in state and "version" in state)
 
+# ================= 格值1总数区间 =================
+
+# --- 非法区间 400 ---
+DRAFT_RANGE = make_draft([[0, 0, 0, 0]] * 4, k=2)  # 4x4 全0
+for bad_range, name in (([3, 1], "下限>上限"), ([0, 17], "上限超总格数"),
+                        ([2], "只填一端"), ([0, None], "一端为空"),
+                        ([-1, 4], "下限为负"), ("1,2", "非数组")):
+    r = client.post("/api/preview", json={**DRAFT_RANGE, "onesRange": bad_range})
+    check(f"非法区间预览 400（{name}）", r.status_code == 400,
+          r.get_json().get("error", ""))
+r = client.post("/api/confirm", json={**DRAFT_RANGE, "onesRange": [0, 99],
+                                      "token": "x"})
+check("非法区间确认 400", r.status_code == 400)
+
+# --- 带区间无解预览不发令牌（2x2 K=2 可行总数恒为 2）---
+r = client.post("/api/preview",
+                json=make_draft([[0, 1], [0, 1]], k=2, rows=2, cols=2)
+                | {"onesRange": [0, 0]})
+rj = r.get_json()
+check("区间无解预览 solvable=false 且无 token",
+      r.status_code == 200 and rj["solvable"] is False and "token" not in rj)
+check("无解预览仍返回计数与区间",
+      rj["originalOnes"] == 2 and rj["onesRange"] == [0, 0])
+
+# --- 带区间预览/确认成功，区间随原稿持久化 ---
+before = get_state()
+pr = client.post("/api/preview", json={**DRAFT_RANGE, "onesRange": [8, 8]})
+pj = pr.get_json()
+check("带区间预览可解", pj.get("solvable") is True and "token" in pj,
+      json.dumps(pj)[:200])
+check("预览返回原稿/修补稿计数与区间",
+      pj["originalOnes"] == 0 and pj["repairedOnes"] == 8
+      and pj["onesRange"] == [8, 8]
+      and pj["input"]["onesRange"] == [8, 8])
+total = sum(sum(row) for row in pj["repaired"])
+check("修补稿总数达标", total == 8)
+
+r = client.post("/api/confirm",
+                json=payload({**DRAFT_RANGE, "onesRange": [8, 8]}, pj["token"]))
+check("带区间确认成功", r.status_code == 200)
+st = r.get_json()["state"]
+check("确认后版本 +1", st["version"] == before["version"] + 1)
+check("区间随原稿持久化", st["onesRange"] == [8, 8])
+check("原稿计数随状态返回", st["ones"] == 8)
+st2 = get_state()
+check("GET /api/state 持久化区间与计数",
+      st2["onesRange"] == [8, 8] and st2["ones"] == 8)
+
+# --- 确认时区间与预览输入不一致 -> 409 mismatch，原稿不变 ---
+pr = client.post("/api/preview", json={**DRAFT_RANGE, "onesRange": [8, 8]})
+token = pr.get_json()["token"]
+r = client.post("/api/confirm",
+                json=payload({**DRAFT_RANGE, "onesRange": [8, 9]}, token))
+check("区间变更 -> 409", r.status_code == 409, r.get_json().get("error", ""))
+r = client.post("/api/confirm", json=payload(DRAFT_RANGE, token))  # 区间被去掉
+check("区间被省略 -> 409", r.status_code == 409)
+check("区间冲突后原稿区间不变", get_state()["onesRange"] == [8, 8])
+# 同一令牌用一致区间仍可确认（前两次 409 未消费令牌）
+r = client.post("/api/confirm",
+                json=payload({**DRAFT_RANGE, "onesRange": [8, 8]}, token))
+check("区间一致仍可确认", r.status_code == 200)
+
+# --- 不带区间的旧式请求：行为与响应保持兼容 ---
+pr = client.post("/api/preview", json=DRAFT_A)
+pj = pr.get_json()
+check("无区间预览 onesRange 为 null", pj["onesRange"] is None
+      and pj["input"]["onesRange"] is None)
+r = client.post("/api/confirm", json=payload(DRAFT_A, pj["token"]))
+st = r.get_json()["state"]
+check("无区间确认成功且持久化 onesRange=null",
+      r.status_code == 200 and st["onesRange"] is None)
+check("无区间状态仍带计数", st["ones"] == sum(sum(row) for row in st["grid"]))
+
 print()
 if FAILS:
     print(f"{len(FAILS)} 项失败：{FAILS}")

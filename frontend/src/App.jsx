@@ -13,6 +13,7 @@ function cloneDesign(d) {
     k: d.k,
     grid: d.grid.map((row) => [...row]),
     locks: d.locks.map((p) => [...p]),
+    onesRange: d.onesRange ? [...d.onesRange] : null,
   };
 }
 
@@ -20,9 +21,18 @@ function sortLocks(locks) {
   return [...locks].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 }
 
+function sameRange(a, b) {
+  const ra = a ?? null;
+  const rb = b ?? null;
+  if (!ra && !rb) return true;
+  if (!ra || !rb) return false;
+  return ra[0] === rb[0] && ra[1] === rb[1];
+}
+
 function sameDesign(a, b) {
   if (!a || !b) return false;
   if (a.rows !== b.rows || a.cols !== b.cols || a.k !== b.k) return false;
+  if (!sameRange(a.onesRange, b.onesRange)) return false;
   for (let r = 0; r < a.rows; r += 1) {
     for (let c = 0; c < a.cols; c += 1) {
       if (a.grid[r][c] !== b.grid[r][c]) return false;
@@ -42,6 +52,16 @@ function validateDraft(d) {
     return `列数必须是 1~${MAX_COLS} 的整数`;
   }
   if (!Number.isInteger(d.k) || d.k < 1) return "最大浮长 K 必须是正整数";
+  if (d.onesRange) {
+    const [lo, hi] = d.onesRange;
+    if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || lo > hi) {
+      return "格值1总数区间须两端都填且满足 0 ≤ 下限 ≤ 上限";
+    }
+    if (hi > d.rows * d.cols) {
+      return `格值1总数区间上限 ${hi} 超过当前总格数 ${d.rows * d.cols}`
+        + "（行数×列数），请调整区间";
+    }
+  }
   return null;
 }
 
@@ -73,6 +93,63 @@ function NumberField({ label, value, min, max, onCommit, onInvalid }) {
         min={min}
         max={max}
         onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      />
+    </label>
+  );
+}
+
+/** 格值1总数区间：两端都留空表示不约束；填写时两端必填，非法输入还原并提示。 */
+function OnesRangeField({ value, max, onCommit, onInvalid }) {
+  const [loText, setLoText] = useState(value ? String(value[0]) : "");
+  const [hiText, setHiText] = useState(value ? String(value[1]) : "");
+  useEffect(() => {
+    setLoText(value ? String(value[0]) : "");
+    setHiText(value ? String(value[1]) : "");
+  }, [value]);
+
+  function commit() {
+    const loEmpty = loText.trim() === "";
+    const hiEmpty = hiText.trim() === "";
+    if (loEmpty && hiEmpty) {
+      if (value !== null) onCommit(null);
+      return;
+    }
+    const lo = Number(loText);
+    const hi = Number(hiText);
+    if (!loEmpty && !hiEmpty
+        && Number.isInteger(lo) && Number.isInteger(hi)
+        && lo >= 0 && lo <= hi && hi <= max) {
+      if (!value || value[0] !== lo || value[1] !== hi) onCommit([lo, hi]);
+      return;
+    }
+    setLoText(value ? String(value[0]) : "");
+    setHiText(value ? String(value[1]) : "");
+    onInvalid();
+  }
+
+  return (
+    <label className="field">
+      <span>格值1总数区间</span>
+      <input
+        type="number"
+        value={loText}
+        min={0}
+        max={max}
+        placeholder="下限"
+        onChange={(e) => setLoText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      />
+      <span>~</span>
+      <input
+        type="number"
+        value={hiText}
+        min={0}
+        max={max}
+        placeholder="上限"
+        onChange={(e) => setHiText(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
       />
@@ -151,6 +228,14 @@ export default function App() {
   );
   const draftViolationCells = useMemo(() => violationCellSet(draftViolations), [draftViolations]);
   const draftLockSet = useMemo(() => (draft ? lockSetOf(draft.locks) : new Set()), [draft]);
+  const draftOnes = useMemo(
+    () => (draft ? draft.grid.flat().reduce((a, b) => a + b, 0) : 0),
+    [draft],
+  );
+  // 尺寸变化后区间可能越界：仅提示调整，不自动截断
+  const rangeOverflow = Boolean(
+    draft && draft.onesRange && draft.onesRange[1] > draft.rows * draft.cols,
+  );
 
   const previewStale = Boolean(preview && draft && !sameDesign(draft, preview.input));
   const dirty = Boolean(original && draft && !sameDesign(draft, original));
@@ -188,6 +273,15 @@ export default function App() {
       const locks = d.locks.filter(([r, c]) => r < rows && c < cols);
       return { ...d, rows, cols, grid, locks };
     });
+    // 区间随草稿保留；越界时明确提示调整，不做悄然截断
+    if (draft.onesRange && draft.onesRange[1] > rows * cols) {
+      setMessage({
+        type: "error",
+        text: `尺寸变为 ${rows}×${cols}（共 ${rows * cols} 格）后，格值1总数区间 `
+          + `[${draft.onesRange[0]}, ${draft.onesRange[1]}] 已越界，`
+          + "请调整区间（区间值未被自动修改）。",
+      });
+    }
   }
 
   function fillAll(value) {
@@ -208,8 +302,8 @@ export default function App() {
       const result = await postPreview(draft);
       setPreview(result);
       setMessage(result.solvable
-        ? { type: "success", text: `预览成功：最少翻转 ${result.flipCount} 格，确认后覆盖原稿。` }
-        : { type: "info", text: "无可行修补：已保留原稿，请调整稿件、锁定格或 K 后重试。" });
+        ? { type: "success", text: `预览成功：最少翻转 ${result.flipCount} 格，格值1总数 ${result.originalOnes} → ${result.repairedOnes}，确认后覆盖原稿。` }
+        : { type: "info", text: "无可行修补：已保留原稿，请调整稿件、锁定格、K 或格值1总数区间后重试。" });
     } catch (e) {
       setPreview(null);
       setMessage({ type: "error", text: e.message });
@@ -273,7 +367,8 @@ export default function App() {
         <h1>周期平铺织物组织设计</h1>
         <p className="subtitle">
           0 = 经线在上，1 = 纬线在上；每行/每列的相同值连续段按环向（左右、上下边界相连）计，
-          长度不得超过 K，全同的一行或一列视为无限浮长。
+          长度不得超过 K，全同的一行或一列视为无限浮长。可指定格值1总数区间 [下限, 上限]：
+          仅总数达标的修补稿参与择优，留空则不约束。
         </p>
       </header>
 
@@ -294,6 +389,16 @@ export default function App() {
           label="最大浮长 K" value={draft.k} min={1} max={Number.MAX_SAFE_INTEGER}
           onCommit={(n) => setDraft((d) => ({ ...d, k: n }))}
           onInvalid={() => setMessage({ type: "error", text: "最大浮长 K 必须是正整数，已拒绝" })}
+        />
+        <OnesRangeField
+          value={draft.onesRange}
+          max={draft.rows * draft.cols}
+          onCommit={(range) => setDraft((d) => ({ ...d, onesRange: range }))}
+          onInvalid={() => setMessage({
+            type: "error",
+            text: `格值1总数区间须两端都填且满足 0 ≤ 下限 ≤ 上限 ≤ ${draft.rows * draft.cols}`
+              + "（总格数），已还原",
+          })}
         />
 
         <div className="mode-switch" role="group" aria-label="编辑模式">
@@ -347,6 +452,18 @@ export default function App() {
             onCellClick={handleCellClick}
             markOf={(r, c, key) => (draftViolationCells.has(key) ? "violation" : "")}
           />
+          <p className="meta">
+            格值1总数 {draftOnes} / {draft.rows * draft.cols}
+            {draft.onesRange
+              ? ` · 修补目标区间 [${draft.onesRange[0]}, ${draft.onesRange[1]}]`
+              : " · 未设格值1总数区间"}
+          </p>
+          {rangeOverflow && (
+            <p className="warn-text">
+              ⚠ 区间上限 {draft.onesRange[1]} 超过当前总格数 {draft.rows * draft.cols}，
+              请调整区间或尺寸后再预览（区间未被自动修改）。
+            </p>
+          )}
           <h3>超限段（{draftViolations.length}）</h3>
           <ViolationList violations={draftViolations} k={draft.k} />
         </section>
@@ -357,7 +474,11 @@ export default function App() {
             <WeaveGrid grid={original.grid} lockSet={lockSetOf(original.locks)} small />
             <p className="meta">
               {original.rows} 行 × {original.cols} 列 · K={original.k} ·
-              锁定 {original.locks.length} 格 · 超限段 {original.violations.length} 个
+              锁定 {original.locks.length} 格 · 超限段 {original.violations.length} 个 ·
+              格值1总数 {original.ones}
+              {original.onesRange
+                ? ` · 区间 [${original.onesRange[0]}, ${original.onesRange[1]}]`
+                : " · 未设区间"}
             </p>
             <ViolationList violations={original.violations} k={original.k} />
           </section>
@@ -367,7 +488,7 @@ export default function App() {
               <h2>修补预览 {previewStale && <span className="stale-tag">已失效</span>}</h2>
               {previewStale && (
                 <p className="warn-text">
-                  预览后草稿（交织格、锁定格或 K）已变动，旧预览失效，请重新预览。
+                  预览后草稿（交织格、锁定格、K 或格值1总数区间）已变动，旧预览失效，请重新预览。
                 </p>
               )}
               {preview.solvable ? (
@@ -381,6 +502,12 @@ export default function App() {
                     最少翻转 {preview.flipCount} 格
                     {preview.flipCount > 0 && "（绿框 ↺ 为翻转位置）"}
                   </p>
+                  <p className="meta">
+                    格值1总数：草稿 {preview.originalOnes} → 修补稿 {preview.repairedOnes}
+                    {preview.onesRange
+                      ? `（区间 [${preview.onesRange[0]}, ${preview.onesRange[1]}]，已达标）`
+                      : "（未设区间）"}
+                  </p>
                   {preview.flipCount > 0 && (
                     <ul className="flip-list">
                       {preview.flips.map(([r, c]) => (
@@ -393,7 +520,13 @@ export default function App() {
                   )}
                 </>
               ) : (
-                <p className="warn-text">无可行修补：在锁定格约束下无法满足浮长限制，原稿保持不变。</p>
+                <p className="warn-text">
+                  无可行修补：在锁定格约束下无法同时满足浮长限制
+                  {preview.onesRange
+                    ? `与格值1总数区间 [${preview.onesRange[0]}, ${preview.onesRange[1]}]`
+                    : ""}
+                  ，原稿保持不变。（草稿当前格值1总数 {preview.originalOnes}）
+                </p>
               )}
             </section>
           )}

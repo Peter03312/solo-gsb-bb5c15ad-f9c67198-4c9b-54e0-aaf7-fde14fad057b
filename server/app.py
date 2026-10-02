@@ -19,11 +19,17 @@ db = Database(DB_PATH)
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
 
+def _count_ones(grid):
+    """格值 1 的总数。"""
+    return sum(sum(row) for row in grid)
+
+
 def _design_payload(design):
-    """原稿及其超限段，供页面展示。"""
+    """原稿及其超限段、格值1总数，供页面展示。"""
     payload = dict(design)
     payload["violations"] = find_violations(
         design["grid"], design["rows"], design["cols"], design["k"])
+    payload["ones"] = _count_ones(design["grid"])
     return payload
 
 
@@ -40,27 +46,32 @@ def get_state():
 @app.post("/api/preview")
 def preview():
     try:
-        rows, cols, grid, locks, k = validate_design(request.get_json(silent=True))
+        rows, cols, grid, locks, k, ones_range = validate_design(
+            request.get_json(silent=True))
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    input_obj = canonical(rows, cols, grid, locks, k)
+    input_obj = canonical(rows, cols, grid, locks, k, ones_range)
     input_text = _canonical_text(input_obj)
     violations = find_violations(grid, rows, cols, k)
-    solved = solve_repair(rows, cols, k, grid, locks)
+    solved = solve_repair(rows, cols, k, grid, locks, ones_range)
 
+    # 原稿（提交的草稿）与指定区间的格值1计数信息，无论有解与否都返回
+    base = {
+        "violations": violations,
+        "input": input_obj,
+        "onesRange": input_obj["onesRange"],
+        "originalOnes": _count_ones(grid),
+    }
     if solved is None:
         # 无可行修补：保留原稿，仅报无解（不产生可确认的预览）
-        return jsonify({
-            "solvable": False,
-            "violations": violations,
-            "input": input_obj,
-        })
+        return jsonify({"solvable": False, **base})
 
     result = {
         "repaired": solved["repaired"],
         "flips": solved["flips"],
         "flipCount": len(solved["flips"]),
+        "repairedOnes": _count_ones(solved["repaired"]),
     }
     token = uuid.uuid4().hex
     # 预览绑定生成时的原稿版本；确认时若该版本已变则拒绝
@@ -69,8 +80,7 @@ def preview():
     return jsonify({
         "solvable": True,
         "token": token,
-        "violations": violations,
-        "input": input_obj,
+        **base,
         **result,
     })
 
@@ -86,13 +96,14 @@ def confirm():
         return jsonify({"error": "缺少预览令牌"}), 400
 
     try:
-        rows, cols, grid, locks, k = validate_design(body)
+        rows, cols, grid, locks, k, ones_range = validate_design(body)
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # 原子确认：令牌未消费、草稿与预览输入一致、预览绑定的原稿版本未变，
-    # 三者同时成立才覆盖原稿（版本仅 +1）并消费令牌；否则整体回滚。
-    input_text = _canonical_text(canonical(rows, cols, grid, locks, k))
+    # 原子确认：令牌未消费、草稿（含格值1总数区间）与预览输入一致、
+    # 预览绑定的原稿版本未变，三者同时成立才覆盖原稿（版本仅 +1）
+    # 并消费令牌；否则整体回滚。
+    input_text = _canonical_text(canonical(rows, cols, grid, locks, k, ones_range))
     design, reason = db.commit_preview(token, input_text)
     if design is None:
         message = {

@@ -1,4 +1,4 @@
-"""设计稿（尺寸、格值、锁定格、K）的合法性校验。"""
+"""设计稿（尺寸、格值、锁定格、K、格值1总数区间）的合法性校验。"""
 
 MAX_ROWS = 16
 MAX_COLS = 8
@@ -14,8 +14,9 @@ def _is_int(v):
 
 
 def validate_design(payload):
-    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k)。
+    """校验并规范化设计稿，返回 (rows, cols, grid, locks, k, ones_range)。
 
+    ones_range 为 [下限, 上限] 或 None（未指定，修补不约束格值1总数）。
     不合法时抛出 ValidationError。
     """
     if not isinstance(payload, dict):
@@ -55,15 +56,37 @@ def validate_design(payload):
 
     grid = [[int(v) for v in row] for row in grid]
     locks = sorted(norm_locks)
-    return rows, cols, grid, locks, k
+    ones_range = _validate_ones_range(payload.get("onesRange"), rows, cols)
+    return rows, cols, grid, locks, k, ones_range
 
 
-def canonical(rows, cols, grid, locks, k):
-    """规范化后的可哈希表示，用于预览一致性比对。"""
+def _validate_ones_range(value, rows, cols):
+    """格值1总数区间：缺省/null 表示不约束；否则两端都必填且 0≤下限≤上限≤总格数。
+
+    越界（上限超过行数×列数）直接拒绝并提示调整，不做截断。
+    """
+    if value is None:
+        return None
+    total = rows * cols
+    if (not isinstance(value, list) or len(value) != 2
+            or not _is_int(value[0]) or not _is_int(value[1])):
+        raise ValidationError("格值1总数区间必须是 [下限, 上限] 两个整数，两端都必填")
+    lo, hi = value
+    if not 0 <= lo <= hi:
+        raise ValidationError("格值1总数区间须满足 0 ≤ 下限 ≤ 上限")
+    if hi > total:
+        raise ValidationError(
+            f"格值1总数区间上限 {hi} 超过总格数 {total}（行数×列数），请调整区间")
+    return [lo, hi]
+
+
+def canonical(rows, cols, grid, locks, k, ones_range=None):
+    """规范化后的可哈希表示，用于预览一致性比对（含格值1总数区间）。"""
     return {
         "rows": rows,
         "cols": cols,
         "grid": [list(row) for row in grid],
         "locks": [list(p) for p in sorted(map(tuple, locks))],
         "k": k,
+        "onesRange": list(ones_range) if ones_range is not None else None,
     }

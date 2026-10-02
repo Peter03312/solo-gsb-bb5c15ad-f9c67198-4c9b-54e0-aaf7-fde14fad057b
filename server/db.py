@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS design (
     grid       TEXT NOT NULL,
     locks      TEXT NOT NULL,
     k          INTEGER NOT NULL,
+    ones_range TEXT,
     version    INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -70,6 +71,10 @@ class Database:
     def _init_schema(self):
         with self._lock, self._connect() as conn:
             conn.executescript(SCHEMA)
+            # 旧库迁移：design 表补齐 ones_range 列（NULL = 未指定区间）
+            dcols = {r["name"] for r in conn.execute("PRAGMA table_info(design)")}
+            if "ones_range" not in dcols:
+                conn.execute("ALTER TABLE design ADD COLUMN ones_range TEXT")
             # 旧库迁移：补齐 base_version 列（旧预览无版本绑定，置空后不可确认）
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(preview)")}
             if "base_version" not in cols:
@@ -87,7 +92,8 @@ class Database:
             if row["n"] == 0:
                 conn.execute(
                     "INSERT INTO design (id, rows, cols, grid, locks, k,"
-                    " version, updated_at) VALUES (1, ?, ?, ?, ?, ?, 1, ?)",
+                    " ones_range, version, updated_at)"
+                    " VALUES (1, ?, ?, ?, ?, ?, NULL, 1, ?)",
                     (DEFAULT_DESIGN["rows"], DEFAULT_DESIGN["cols"],
                      json.dumps(DEFAULT_DESIGN["grid"]),
                      json.dumps(DEFAULT_DESIGN["locks"]),
@@ -96,12 +102,14 @@ class Database:
 
     @staticmethod
     def _row_to_design(row):
+        ones_range = row["ones_range"]
         return {
             "rows": row["rows"],
             "cols": row["cols"],
             "grid": json.loads(row["grid"]),
             "locks": json.loads(row["locks"]),
             "k": row["k"],
+            "onesRange": json.loads(ones_range) if ones_range is not None else None,
             "version": row["version"],
         }
 
@@ -155,11 +163,14 @@ class Database:
                 rows, cols, locks, k = (
                     input_obj["rows"], input_obj["cols"],
                     input_obj["locks"], input_obj["k"])
+                ones_range = input_obj.get("onesRange")
                 conn.execute(
                     "UPDATE design SET rows = ?, cols = ?, grid = ?, locks = ?,"
-                    " k = ?, version = version + 1, updated_at = ? WHERE id = 1",
-                    (rows, cols, json.dumps(grid), json.dumps(locks),
-                     k, _now()),
+                    " k = ?, ones_range = ?, version = version + 1,"
+                    " updated_at = ? WHERE id = 1",
+                    (rows, cols, json.dumps(grid), json.dumps(locks), k,
+                     json.dumps(ones_range) if ones_range is not None else None,
+                     _now()),
                 )
                 # 仅在条件全部满足时消费令牌；UPDATE 后删除，行锁持有到提交
                 deleted = conn.execute(
